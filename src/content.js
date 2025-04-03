@@ -56,6 +56,37 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 	}
 });
 
+// Modificar el listener de cambios de configuración para reiniciar el procesamiento
+chrome.storage.onChanged.addListener((changes, namespace) => {
+	try {
+		for (let [key, {newValue}] of Object.entries(changes)) {
+			if (key in config) {
+				const oldValue = config[key];
+				config[key] = newValue;
+				log.info(`Configuración actualizada: ${key} =`, newValue);
+
+				// Si cambia el idioma, reiniciar el procesamiento
+				if (key === 'targetLanguage' && oldValue !== newValue) {
+					log.info('🔄 Cambio de idioma detectado, reiniciando procesamiento...');
+					lastProcessedText = ''; // Forzar reprocesamiento del texto actual
+					isProcessing = false; // Asegurar que podemos procesar de nuevo
+
+					// Limpiar cola de audio
+					audioQueue.items = [];
+					if (audioQueue.currentAudioElement) {
+						audioQueue.currentAudioElement.pause();
+						audioQueue.currentAudioElement = null;
+					}
+					audioQueue.isPlaying = false;
+					audioQueue.lastPlayedText = '';
+				}
+			}
+		}
+	} catch (error) {
+		log.error('Error en listener de cambios:', error);
+	}
+});
+
 // Cargar configuraciones
 chrome.storage.sync.get(['targetLanguage', 'volume', 'speed', 'isEnabled'], (data) => {
 	if (data.targetLanguage) config.targetLanguage = data.targetLanguage;
@@ -128,7 +159,7 @@ function detectSubtitles() {
 	}
 }
 
-// Modificar initializePlatformObservers para ser más simple y frecuente
+// Modificar initializePlatformObservers para manejar el estado enabled/disabled
 function initializePlatformObservers() {
 	if (!window.location.hostname.includes('udemy.com')) return;
 
@@ -137,23 +168,62 @@ function initializePlatformObservers() {
 	lastProcessedText = '';
 	isProcessing = false;
 
-	log.info('🔄 Iniciando observación de subtítulos');
+	let searchInterval;
 
-	// Buscar la etiqueta cada 100ms
-	const searchInterval = setInterval(() => {
-		const subtitleElement = document.querySelector('[data-purpose="captions-cue-text"]');
-		if (subtitleElement) {
-			const currentText = subtitleElement.textContent?.trim();
+	function startObservation() {
+		if (!config.isEnabled) return;
 
-			if (currentText && currentText !== lastProcessedText) {
-				log.info('📝 Nuevo subtítulo detectado:', currentText);
-				handleSubtitleChange(currentText);
+		log.info('🔄 Iniciando observación de subtítulos');
+		// Buscar la etiqueta cada 100ms
+		searchInterval = setInterval(() => {
+			if (!config.isEnabled) {
+				clearInterval(searchInterval);
+				return;
+			}
+
+			const subtitleElement = document.querySelector('[data-purpose="captions-cue-text"]');
+			if (subtitleElement) {
+				const currentText = subtitleElement.textContent?.trim();
+				if (currentText && currentText !== lastProcessedText) {
+					log.info('📝 Nuevo subtítulo detectado:', currentText);
+					handleSubtitleChange(currentText);
+				}
+			}
+		}, 100);
+	}
+
+	// Iniciar observación si está habilitado
+	if (config.isEnabled) {
+		startObservation();
+	}
+
+	// Escuchar cambios en isEnabled
+	chrome.storage.onChanged.addListener((changes) => {
+		if (changes.isEnabled) {
+			if (changes.isEnabled.newValue) {
+				log.info('🎯 Activando detección de subtítulos');
+				startObservation();
+			} else {
+				log.info('🛑 Deteniendo detección de subtítulos');
+				if (searchInterval) clearInterval(searchInterval);
+				// Detener audio actual si existe
+				if (audioQueue.currentAudioElement) {
+					audioQueue.currentAudioElement.pause();
+					audioQueue.currentAudioElement = null;
+				}
+				// Limpiar cola de audio
+				audioQueue.items = [];
+				audioQueue.isPlaying = false;
+				audioQueue.lastPlayedText = '';
+				lastProcessedText = '';
 			}
 		}
-	}, 100);
+	});
 
-	// Limpiar después de 1 hora (o cuando se cambie de video)
-	setTimeout(() => clearInterval(searchInterval), 3600000);
+	// Limpiar después de 1 hora
+	setTimeout(() => {
+		if (searchInterval) clearInterval(searchInterval);
+	}, 3600000);
 }
 
 // Nueva función para verificar y procesar subtítulos
@@ -210,10 +280,18 @@ async function processSubtitle(text) {
 
 // Simplificar el handleSubtitleChange
 async function handleSubtitleChange(text) {
-	if (!text || !config.isEnabled || text === lastProcessedText) return;
+	if (!text || !config.isEnabled) return;
 
 	try {
-		log.info('🎯 Procesando:', text);
+		// Si el texto es el mismo pero cambió el idioma, permitir reprocesamiento
+		if (text === lastProcessedText && !isProcessing) {
+			log.info('🔄 Reprocesando texto en nuevo idioma:', config.targetLanguage);
+		} else if (text === lastProcessedText) {
+			return;
+		}
+
+		isProcessing = true;
+		log.info(`🎯 Procesando en ${config.targetLanguage}:`, text);
 		lastProcessedText = text;
 
 		const translatedText = await translateText(text);
@@ -224,6 +302,8 @@ async function handleSubtitleChange(text) {
 	} catch (error) {
 		log.error('Error procesando subtítulo:', error);
 		lastProcessedText = ''; // Permitir reintentar en caso de error
+	} finally {
+		isProcessing = false;
 	}
 }
 
