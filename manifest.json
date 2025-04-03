@@ -1,0 +1,23 @@
+{
+	"manifest_version": 3,
+	"name": "HablaPotable",
+	"version": "1.0",
+	"description": "Traduce y lee en voz alta los subtítulos de videos",
+	"permissions": ["storage", "activeTab", "scripting"],
+	"host_permissions": ["*://*.youtube.com/*", "*://*.udemy.com/*", "*://*.coursera.org/*", "*://*.google.com/*", "*://*.voicerss.org/*"],
+	"action": {
+		"default_popup": "popup.html"
+	},
+	"background": {
+		"service_worker": "dist/background.js"
+	},
+	"content_scripts": [
+		{
+			"matches": ["*://*.udemy.com/*", "*://*.coursera.org/*", "*://*.youtube.com/*"],
+			"js": ["dist/content.js"]
+		}
+	],
+	"content_security_policy": {
+		"extension_pages": "script-src 'self'; object-src 'self'; media-src https://translate.google.com https://*.googleapis.com"
+	}
+}

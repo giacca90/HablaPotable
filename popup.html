@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="UTF-8" />
+		<style>
+			body {
+				width: 300px;
+				padding: 10px;
+			}
+			select,
+			.control-group {
+				width: 100%;
+				margin: 10px 0;
+			}
+			.control-group label {
+				display: block;
+				margin-bottom: 5px;
+			}
+			.status {
+				padding: 5px;
+				margin: 10px 0;
+				border-radius: 3px;
+			}
+			.status.active {
+				background-color: #dff0d8;
+				color: #3c763d;
+			}
+			.status.inactive {
+				background-color: #f2dede;
+				color: #a94442;
+			}
+			.current-page {
+				background: #f8f9fa;
+				padding: 5px;
+				border-radius: 3px;
+				margin-bottom: 10px;
+				font-size: 0.9em;
+				word-break: break-all;
+			}
+			.toggle-button {
+				width: 100%;
+				padding: 8px;
+				margin: 10px 0;
+				background: #f44336; /* Cambiado de #4CAF50 a #f44336 */
+				color: white;
+				border: none;
+				border-radius: 3px;
+				cursor: pointer;
+			}
+			.toggle-button.disabled {
+				background: #4caf50; /* Cambiado de #f44336 a #4CAF50 */
+			}
+		</style>
+	</head>
+	<body>
+		<h3>HablaPotable</h3>
+
+		<div id="subtitleStatus" class="status">Buscando subtítulos...</div>
+
+		<div class="current-page" id="currentPage">Página actual: Cargando...</div>
+
+		<button id="toggleButton" class="toggle-button">Activar lectura</button>
+
+		<div class="control-group">
+			<label for="targetLang">Idioma de salida:</label>
+			<select id="targetLang">
+				<option value="de">Alemán</option>
+				<option value="ar">Árabe</option>
+				<option value="bn">Bengalí</option>
+				<option value="ca">Catalán</option>
+				<option value="ko">Coreano</option>
+				<option value="zh-CN">Chino (Simplificado)</option>
+				<option value="da">Danés</option>
+				<option value="eu">Euskera</option>
+				<option value="es">Español</option>
+				<option value="fil">Filipino</option>
+				<option value="fi">Finés</option>
+				<option value="fr">Francés</option>
+				<option value="el">Griego</option>
+				<option value="hi">Hindi</option>
+				<option value="nl">Holandés</option>
+				<option value="id">Indonesio</option>
+				<option value="en">Inglés</option>
+				<option value="it">Italiano</option>
+				<option value="ja">Japonés</option>
+				<option value="ms">Malayo</option>
+				<option value="no">Noruego</option>
+				<option value="fa">Persa</option>
+				<option value="pl">Polaco</option>
+				<option value="pt">Portugués</option>
+				<option value="ru">Ruso</option>
+				<option value="sv">Sueco</option>
+				<option value="th">Tailandés</option>
+				<option value="tr">Turco</option>
+				<option value="uk">Ucraniano</option>
+				<option value="vi">Vietnamita</option>
+			</select>
+		</div>
+
+		<div class="control-group">
+			<label for="volume">Volumen: <span id="volumeValue">100%</span></label>
+			<input type="range" id="volume" min="0" max="100" value="100" />
+		</div>
+
+		<div class="control-group">
+			<label for="speed">Velocidad: <span id="speedValue">1x</span></label>
+			<input type="range" id="speed" min="50" max="200" value="100" />
+		</div>
+
+		<script src="dist/popup.js"></script>
+	</body>
+</html>
