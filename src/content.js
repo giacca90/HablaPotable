@@ -30,6 +30,7 @@ const config = {
 // Variables para el control de procesamiento
 let isProcessing = false;
 let lastProcessedText = '';
+let lastDetectedSubtitle = '';
 
 // Cargar configuraciones de manera segura
 chrome.storage.sync
@@ -42,43 +43,18 @@ chrome.storage.sync
 		log.error('Error cargando configuración:', error);
 	});
 
-// Escuchar cambios en la configuración de manera segura
+// Unificar los listeners de configuración en uno solo
 chrome.storage.onChanged.addListener((changes, namespace) => {
 	try {
-		for (let [key, {newValue}] of Object.entries(changes)) {
+		for (let [key, {newValue, oldValue}] of Object.entries(changes)) {
 			if (key in config) {
 				config[key] = newValue;
 				log.info(`Configuración actualizada: ${key} =`, newValue);
-			}
-		}
-	} catch (error) {
-		log.error('Error en listener de cambios:', error);
-	}
-});
 
-// Modificar el listener de cambios de configuración para reiniciar el procesamiento
-chrome.storage.onChanged.addListener((changes, namespace) => {
-	try {
-		for (let [key, {newValue}] of Object.entries(changes)) {
-			if (key in config) {
-				const oldValue = config[key];
-				config[key] = newValue;
-				log.info(`Configuración actualizada: ${key} =`, newValue);
-
-				// Si cambia el idioma, reiniciar el procesamiento
-				if (key === 'targetLanguage' && oldValue !== newValue) {
-					log.info('🔄 Cambio de idioma detectado, reiniciando procesamiento...');
-					lastProcessedText = ''; // Forzar reprocesamiento del texto actual
-					isProcessing = false; // Asegurar que podemos procesar de nuevo
-
-					// Limpiar cola de audio
-					audioQueue.items = [];
-					if (audioQueue.currentAudioElement) {
-						audioQueue.currentAudioElement.pause();
-						audioQueue.currentAudioElement = null;
-					}
-					audioQueue.isPlaying = false;
-					audioQueue.lastPlayedText = '';
+				// Si cambia el idioma o se desactiva/activa la extensión, reiniciar el procesamiento
+				if ((key === 'targetLanguage' && oldValue !== newValue) || key === 'isEnabled') {
+					log.info('🔄 Cambio importante detectado, reiniciando procesamiento...');
+					resetProcessingState();
 				}
 			}
 		}
@@ -87,21 +63,20 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 	}
 });
 
-// Cargar configuraciones
-chrome.storage.sync.get(['targetLanguage', 'volume', 'speed', 'isEnabled'], (data) => {
-	if (data.targetLanguage) config.targetLanguage = data.targetLanguage;
-	if (data.volume) config.volume = data.volume;
-	if (data.speed) config.speed = data.speed;
-	if (data.isEnabled !== undefined) config.isEnabled = data.isEnabled;
-});
+// Nueva función para resetear el estado
+function resetProcessingState() {
+	lastProcessedText = '';
+	isProcessing = false;
 
-// Escuchar cambios en la configuración
-chrome.storage.onChanged.addListener((changes) => {
-	if (changes.targetLanguage) config.targetLanguage = changes.targetLanguage.newValue;
-	if (changes.volume) config.volume = changes.volume.newValue;
-	if (changes.speed) config.speed = changes.speed.newValue;
-	if (changes.isEnabled) config.isEnabled = changes.isEnabled.newValue;
-});
+	// Limpiar cola de audio
+	if (audioQueue.currentAudioElement) {
+		audioQueue.currentAudioElement.pause();
+		audioQueue.currentAudioElement = null;
+	}
+	audioQueue.items = [];
+	audioQueue.isPlaying = false;
+	audioQueue.lastPlayedText = '';
+}
 
 // Manejar mensajes del popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -114,128 +89,96 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // Función para detectar subtítulos según la plataforma
 function detectSubtitles() {
-	log.info('Iniciando detección de subtítulos');
 	let subtitleText = '';
 
 	try {
 		if (window.location.hostname.includes('udemy.com')) {
-			// Usar solo el selector específico de Udemy
 			const subtitleElement = document.querySelector('[data-purpose="captions-cue-text"]');
 			if (subtitleElement) {
 				subtitleText = subtitleElement.textContent.trim();
-				log.info('✅ Subtítulo Udemy encontrado:', {
-					texto: subtitleText,
-					elemento: subtitleElement,
-				});
+				// Comprobar si es el mismo subtítulo
+				if (subtitleText === lastDetectedSubtitle) {
+					return null;
+				}
+				lastDetectedSubtitle = subtitleText;
 			}
 		} else if (window.location.hostname.includes('youtube.com')) {
-			// YouTube - múltiples intentos de detección
-			const ytSelectors = ['.ytp-caption-segment', '.captions-text', '.caption-window span', '.caption-visual-line', '.ytp-caption-window-container span'];
-
-			for (const selector of ytSelectors) {
-				const elements = document.querySelectorAll(selector);
-				for (const element of elements) {
-					if (element.offsetParent !== null && element.textContent.trim()) {
-						subtitleText = element.textContent.trim();
-						break;
-					}
+			const elements = document.querySelectorAll('span.ytp-caption-segment');
+			for (const element of elements) {
+				if (element.offsetParent !== null && element.textContent.trim()) {
+					subtitleText = subtitleText + ' ' + element.textContent.trim();
 				}
-				if (subtitleText) break;
 			}
+			// Comprobar duplicados para YouTube
+			if (subtitleText === lastDetectedSubtitle) {
+				return null;
+			}
+			lastDetectedSubtitle = subtitleText;
 		} else if (window.location.hostname.includes('coursera.org')) {
 			const courseraElement = document.querySelector('.rc-SubtitleContent, .cue-text');
 			subtitleText = courseraElement?.textContent.trim() || '';
+			// Comprobar duplicados para Coursera
+			if (subtitleText === lastDetectedSubtitle) {
+				return null;
+			}
+			lastDetectedSubtitle = subtitleText;
 		}
 
 		if (subtitleText) {
 			log.info(`Subtítulo detectado en ${window.location.hostname}:`, subtitleText);
+			return subtitleText;
 		} else {
-			log.warn(`No se encontró subtítulo en ${window.location.hostname}`);
+			return null;
 		}
-		return subtitleText;
 	} catch (error) {
 		log.error('Error detectando subtítulos', error);
-		return '';
+		return null;
 	}
 }
 
 // Modificar initializePlatformObservers para manejar el estado enabled/disabled
 function initializePlatformObservers() {
-	if (!window.location.hostname.includes('udemy.com')) return;
-
 	// Limpiar estados previos
+	resetProcessingState();
 	if (observer) observer.disconnect();
-	lastProcessedText = '';
-	isProcessing = false;
-
-	let searchInterval;
 
 	function startObservation() {
 		if (!config.isEnabled) return;
 
 		log.info('🔄 Iniciando observación de subtítulos');
-		// Buscar la etiqueta cada 100ms
-		searchInterval = setInterval(() => {
-			if (!config.isEnabled) {
-				clearInterval(searchInterval);
-				return;
-			}
 
-			const subtitleElement = document.querySelector('[data-purpose="captions-cue-text"]');
-			if (subtitleElement) {
-				const currentText = subtitleElement.textContent?.trim();
-				if (currentText && currentText !== lastProcessedText) {
-					log.info('📝 Nuevo subtítulo detectado:', currentText);
-					handleSubtitleChange(currentText);
-				}
-			}
-		}, 100);
+		// Configurar y conectar el observer para detectar cambios en subtítulos
+		const observerConfig = {
+			childList: true,
+			subtree: true,
+			characterData: true,
+		};
+
+		observer.observe(document.body, observerConfig);
+		log.info('🎯 Observer conectado a:', targetNode);
+
+		// Hacer una primera detección
+		const initialSubtitles = detectSubtitles();
+		if (initialSubtitles) {
+			log.info('✨ Subtítulos iniciales encontrados');
+			processSubtitle(initialSubtitles);
+		} else {
+			log.info('❌ No se encontraron subtítulos iniciales');
+		}
 	}
 
-	// Iniciar observación si está habilitado
 	if (config.isEnabled) {
 		startObservation();
 	}
 
-	// Escuchar cambios en isEnabled
-	chrome.storage.onChanged.addListener((changes) => {
-		if (changes.isEnabled) {
-			if (changes.isEnabled.newValue) {
-				log.info('🎯 Activando detección de subtítulos');
-				startObservation();
-			} else {
-				log.info('🛑 Deteniendo detección de subtítulos');
-				if (searchInterval) clearInterval(searchInterval);
-				// Detener audio actual si existe
-				if (audioQueue.currentAudioElement) {
-					audioQueue.currentAudioElement.pause();
-					audioQueue.currentAudioElement = null;
-				}
-				// Limpiar cola de audio
-				audioQueue.items = [];
-				audioQueue.isPlaying = false;
-				audioQueue.lastPlayedText = '';
-				lastProcessedText = '';
-			}
-		}
-	});
-
-	// Limpiar después de 1 hora
+	// Reconectar el observer cada hora para evitar memory leaks
 	setTimeout(() => {
-		if (searchInterval) clearInterval(searchInterval);
-	}, 3600000);
-}
-
-// Nueva función para verificar y procesar subtítulos
-function checkAndProcessSubtitles() {
-	const subtitleElement = document.querySelector('[data-purpose="captions-cue-text"]');
-	if (subtitleElement) {
-		const currentText = subtitleElement.textContent?.trim();
-		if (currentText && currentText !== lastProcessedText) {
-			log.info('📝 Subtítulo detectado:', currentText);
-			handleSubtitleChange(currentText);
+		log.info('🔄 Reconectando observer por mantenimiento...');
+		if (observer) {
+			observer.disconnect();
+			startObservation();
 		}
-	}
+	}, 3600000);
 }
 
 // Modificar el observer para manejar la desaparición/reaparición
@@ -245,54 +188,34 @@ const observer = new MutationObserver((mutations) => {
 	// Verificar cambios en cada mutación
 	mutations.forEach((mutation) => {
 		// Si se agregaron nodos, verificar si contienen subtítulos
-		if (mutation.addedNodes.length > 0) {
-			checkAndProcessSubtitles();
-		}
-		// Si hubo cambios en el texto
-		else if (mutation.type === 'characterData') {
-			checkAndProcessSubtitles();
+		if (mutation.addedNodes.length > 0 || mutation.type === 'characterData') {
+			const sub = detectSubtitles();
+			if (sub) {
+				processSubtitle(sub);
+			}
 		}
 	});
 });
 
 // Nueva función para procesar subtítulos
 async function processSubtitle(text) {
-	try {
-		// Guardar texto actual antes de procesar
-		const textToProcess = text;
-		lastProcessedText = text;
-
-		log.info('🎯 Procesando:', textToProcess);
-		const translatedText = await translateText(textToProcess);
-
-		if (translatedText) {
-			log.info('🔄 Traducido:', translatedText);
-			await synthesizeSpeech(translatedText);
-		}
-	} catch (error) {
-		log.error('Error procesando subtítulo:', error);
-		// Solo resetear si no hay un nuevo texto en proceso
-		if (lastProcessedText === text) {
-			lastProcessedText = '';
-		}
-	}
-}
-
-// Simplificar el handleSubtitleChange
-async function handleSubtitleChange(text) {
-	if (!text || !config.isEnabled) return;
+	if (!text || !config.isEnabled || isProcessing) return;
 
 	try {
-		// Si el texto es el mismo pero cambió el idioma, permitir reprocesamiento
-		if (text === lastProcessedText && !isProcessing) {
-			log.info('🔄 Reprocesando texto en nuevo idioma:', config.targetLanguage);
-		} else if (text === lastProcessedText) {
+		// Triple verificación de duplicados
+		if (text === lastDetectedSubtitle && text === lastProcessedText && !isProcessing) {
+			log.info('🔄 Subtítulo duplicado ignorado:', text);
 			return;
 		}
 
+		// Si el idioma cambió, permitir reprocesar
+		if (text === lastProcessedText && !isProcessing) {
+			log.info('🔄 Reprocesando texto en nuevo idioma:', config.targetLanguage);
+		}
+
 		isProcessing = true;
-		log.info(`🎯 Procesando en ${config.targetLanguage}:`, text);
 		lastProcessedText = text;
+		log.info(`🎯 Procesando en ${config.targetLanguage}:`, text);
 
 		const translatedText = await translateText(text);
 		if (translatedText) {
@@ -301,7 +224,9 @@ async function handleSubtitleChange(text) {
 		}
 	} catch (error) {
 		log.error('Error procesando subtítulo:', error);
-		lastProcessedText = ''; // Permitir reintentar en caso de error
+		if (lastProcessedText === text) {
+			lastProcessedText = '';
+		}
 	} finally {
 		isProcessing = false;
 	}
@@ -513,87 +438,15 @@ async function synthesizeSpeech(text) {
 	}
 }
 
-function getNextSubtitle() {
-	const currentElement = document.querySelector('[data-purpose="captions-cue-text"]');
-	if (!currentElement) return null;
-
-	// Buscar el siguiente elemento de subtítulos
-	const allSubtitles = document.querySelectorAll('[data-purpose="captions-cue-text"]');
-	const currentIndex = Array.from(allSubtitles).indexOf(currentElement);
-	return allSubtitles[currentIndex + 1]?.textContent.trim() || null;
-}
-
-// Mejorar synthesizeSpeech para manejar límites de API
-async function synthesizeSpeech(text) {
-	if (!text) return false;
-
-	try {
-		// Dividir textos largos
-		const chunks = text.match(/.{1,100}(?:[.!?]|$)/g) || [text];
-
-		for (const chunk of chunks) {
-			// Agregar delay entre peticiones
-			await new Promise((resolve) => setTimeout(resolve, 250));
-
-			const response = await new Promise((resolve, reject) => {
-				chrome.runtime.sendMessage(
-					{
-						action: 'synthesize',
-						text: chunk,
-						targetLang: config.targetLanguage,
-						volume: config.volume,
-						speed: config.speed,
-					},
-					(response) => {
-						if (!response?.success) {
-							reject(new Error(response?.error || 'Error en síntesis'));
-							return;
-						}
-						resolve(response);
-					},
-				);
-			});
-
-			if (response.audioData) {
-				// Usar el nuevo método de cola
-				audioQueue.items.push({
-					text: chunk,
-					audioData: response.audioData,
-				});
-				processAudioQueue().catch(log.error);
-			}
-		}
-		return true;
-	} catch (error) {
-		log.error('Error en síntesis:', error);
-		return false;
-	}
-}
-
-// Función auxiliar para reproducir audio
-async function playAudio(src) {
-	const audio = new Audio(src);
-	audio.volume = config.volume / 100;
-	audio.playbackRate = config.speed / 100;
-
-	await audio.play();
-	return new Promise((resolve) => {
-		audio.onended = resolve;
-	});
-}
-
-// Agregar función para verificar si el video está en reproducción
-function isVideoPlaying() {}
-
-// Eliminar o reemplazar la función processSubtitle ya que no la necesitamos
-// Ya que estamos usando el sistema de background para traducir
-
 // Simplificar los listeners de inicialización
-document.addEventListener('DOMContentLoaded', initializePlatformObservers);
+document.addEventListener('DOMContentLoaded', () => {
+	log.info('🎬 DOM Content Loaded');
+	initializePlatformObservers();
+});
 
 // Ejecutar también cuando la página esté completamente cargada
 window.addEventListener('load', () => {
-	log.info('Página cargada, verificando observadores...');
+	log.info('🎬 Window Loaded');
 	initializePlatformObservers();
 });
 
@@ -608,308 +461,3 @@ new MutationObserver(() => {
 
 // Asegurar que la extensión se inicia
 log.info('Extensión cargada completamente');
-
-const elements = Array.from(document.querySelectorAll('.captions-display, .well--captions'));
-const matchingElement = elements.find((el) => el.textContent.includes('texto que buscas'));
-
-// Agregar nuevas estructuras de datos para subtítulos
-const subtitleStore = {
-	subtitles: [], // Array de {start, end, text, translation, audioUrl}
-	currentIndex: -1,
-	isLoaded: false,
-};
-
-// Modificar la función loadSubtitlesFromVideo para tener más logs
-async function loadSubtitlesFromVideo() {
-	log.info('🔍 Iniciando sistema de búsqueda de video y subtítulos...');
-	let attempts = 0;
-
-	// Función para buscar el video
-	const findVideo = () => {
-		return new Promise((resolve) => {
-			const checkVideo = () => {
-				attempts++;
-				const video = document.querySelector('video');
-				if (video) {
-					log.info(`✅ Video encontrado después de ${attempts} intentos`);
-					resolve(video);
-				} else {
-					log.info(`⏳ Intento ${attempts}: Esperando video...`);
-					setTimeout(checkVideo, 500);
-				}
-			};
-			checkVideo();
-		});
-	};
-
-	// Función para buscar subtítulos
-	const findSubtitles = (video) => {
-		return new Promise((resolve) => {
-			let trackAttempts = 0;
-			let vttAttempts = 0;
-
-			const checkTracks = async () => {
-				trackAttempts++;
-				const tracks = Array.from(video.textTracks);
-				log.info(`📝 Intento ${trackAttempts}: Buscando tracks...`, 'Tracks encontrados:', tracks.length);
-
-				// Intentar con tracks
-				const track = tracks.find((t) => t.kind === 'subtitles' || t.kind === 'captions');
-				if (track) {
-					log.info('🎯 Track encontrado:', {
-						kind: track.kind,
-						label: track.label,
-						language: track.language,
-					});
-
-					if (track.cues?.length) {
-						log.info('✅ Cues encontrados en track:', track.cues.length);
-						resolve({type: 'cues', data: track.cues});
-						return;
-					}
-				}
-
-				// Si no hay tracks, buscar URL del VTT
-				vttAttempts++;
-				log.info(`📄 Intento ${vttAttempts}: Buscando archivo VTT...`);
-				const vttUrl = await findVttUrl();
-
-				if (vttUrl) {
-					log.info('✅ URL de VTT encontrada:', vttUrl);
-					resolve({type: 'vtt', data: vttUrl});
-					return;
-				}
-
-				log.info('⏳ No se encontraron subtítulos, reintentando...');
-				setTimeout(checkTracks, 500);
-			};
-			checkTracks();
-		});
-	};
-
-	try {
-		log.info('🎬 Iniciando búsqueda de video...');
-		const video = await findVideo();
-
-		log.info('🎯 Video encontrado, buscando subtítulos...');
-		const subtitles = await findSubtitles(video);
-
-		if (subtitles.type === 'cues') {
-			log.info('🎯 Procesando cues:', subtitles.data.length);
-			processSubtitleCues(subtitles.data);
-		} else {
-			log.info('🎯 Cargando archivo VTT:', subtitles.data);
-			await loadVttFile(subtitles.data);
-		}
-	} catch (error) {
-		log.error('Error en carga:', error);
-	}
-}
-
-// Modificar la función findVttUrl para buscar en más lugares
-async function findVttUrl() {
-	log.info('🔍 Buscando URL de subtítulos...');
-	try {
-		// Método 1: Buscar en el player
-		const transcriptBtn = document.querySelector('[data-purpose="transcript-toggle"]');
-		if (transcriptBtn) {
-			log.info('Encontrado botón de transcripción, buscando datos...');
-			const transcriptData = transcriptBtn.getAttribute('data-transcripts');
-			if (transcriptData) {
-				try {
-					const data = JSON.parse(transcriptData);
-					if (data?.length > 0) {
-						log.info('✅ URL encontrada en transcriptData:', data[0].url);
-						return data[0].url;
-					}
-				} catch (e) {
-					log.warn('Error parsing transcriptData:', e);
-				}
-			}
-		}
-
-		// Método 2: Buscar en la API de Udemy
-		const videoId = window.location.pathname.match(/\/lecture\/(\d+)/)?.[1];
-		if (videoId) {
-			log.info('Intentando obtener subtítulos por ID de video:', videoId);
-			const response = await fetch(`/api-2.0/users/me/subscribed-courses/lectures/${videoId}/supplementary-assets`);
-			const assets = await response.json();
-			const caption = assets.find((asset) => (asset.asset_type === 'Caption' && asset.title.includes('Español')) || asset.title.includes('English'));
-			if (caption?.url) {
-				log.info('✅ URL encontrada en API:', caption.url);
-				return caption.url;
-			}
-		}
-
-		// Método 3: Buscar en los scripts (el método anterior)
-		const scripts = Array.from(document.scripts);
-		for (const script of scripts) {
-			const match = script.text.match(/subtitlesUrl"?"?\s*:\s*"([^"]+\.vtt)"/);
-			if (match) {
-				log.info('✅ URL encontrada en scripts:', match[1]);
-				return match[1];
-			}
-		}
-
-		// Método 4: Buscar directamente en el player
-		const player = document.querySelector('.video-player');
-		if (player) {
-			const playerData = player.getAttribute('data-params');
-			if (playerData) {
-				try {
-					const data = JSON.parse(playerData);
-					if (data?.captions?.url) {
-						log.info('✅ URL encontrada en player:', data.captions.url);
-						return data.captions.url;
-					}
-				} catch (e) {
-					log.warn('Error parsing playerData:', e);
-				}
-			}
-		}
-
-		log.warn('❌ No se encontró URL de subtítulos');
-		return null;
-	} catch (error) {
-		log.error('Error buscando URL de subtítulos:', error);
-		return null;
-	}
-}
-
-// Función para encontrar URL del VTT en Udemy
-async function findVttUrl() {
-	// Buscar en la respuesta de la API de Udemy o en el DOM
-	const scriptContent = Array.from(document.scripts).find((script) => script.text.includes('"captions"'))?.text;
-
-	if (scriptContent) {
-		const match = scriptContent.match(/"url":"([^"]+\.vtt)"/);
-		return match ? match[1] : null;
-	}
-	return null;
-}
-
-// Función para cargar y procesar archivo VTT
-async function loadVttFile(url) {
-	const response = await fetch(url);
-	const vttText = await response.text();
-	const parsed = parseVTT(vttText);
-	await processSubtitles(parsed);
-}
-
-// Función para procesar subtítulos
-async function processSubtitles(subs) {
-	subtitleStore.subtitles = [];
-	log.info('🎯 Iniciando procesamiento de', subs.length, 'subtítulos');
-
-	for (let i = 0; i < subs.length; i++) {
-		const sub = subs[i];
-		log.info(`📝 Procesando subtítulo ${i + 1}/${subs.length}:`, sub.text);
-
-		log.info('🔄 Traduciendo:', sub.text);
-		const translation = await translateText(sub.text);
-		log.info('✅ Traducción completada:', translation);
-
-		log.info('🔊 Generando audio para:', translation);
-		const audioData = await synthesizeSpeech(translation);
-		log.info('✅ Audio generado para el subtítulo', i + 1);
-
-		subtitleStore.subtitles.push({
-			start: sub.start,
-			end: sub.end,
-			text: sub.text,
-			translation,
-			audioData,
-			index: i,
-		});
-	}
-
-	log.info('✨ Proceso completo. Subtítulos procesados:', subtitleStore.subtitles.length);
-	subtitleStore.isLoaded = true;
-	setupVideoSync();
-}
-
-function setupVideoSync() {
-	const video = document.querySelector('video');
-	if (!video) {
-		log.error('No se encontró el video para sincronizar');
-		return;
-	}
-
-	log.info('🎬 Configurando sincronización con video');
-	video.addEventListener('timeupdate', () => {
-		const currentTime = video.currentTime;
-		const subtitle = subtitleStore.subtitles.find((sub) => currentTime >= sub.start && currentTime < sub.end);
-
-		if (subtitle && subtitleStore.currentIndex !== subtitle.index) {
-			log.info('⏱️ Tiempo:', currentTime.toFixed(2), 'Reproduciendo subtítulo:', subtitle.index, 'Texto:', subtitle.text);
-			subtitleStore.currentIndex = subtitle.index;
-			playSubtitleAudio(subtitle.audioData);
-		}
-	});
-}
-
-function playSubtitleAudio(audioData) {
-	if (!config.isEnabled) return;
-
-	const audio = new Audio(audioData);
-	audio.volume = config.volume / 100;
-	audio.playbackRate = config.speed / 100;
-	log.info('🔊 Reproduciendo audio', {
-		volumen: audio.volume,
-		velocidad: audio.playbackRate,
-	});
-
-	audio.play().catch((error) => {
-		log.error('Error reproduciendo audio:', error);
-	});
-}
-
-// Función para procesar cues de subtítulos
-function processSubtitleCues(cues) {
-	const subtitles = Array.from(cues).map((cue) => ({
-		start: cue.startTime,
-		end: cue.endTime,
-		text: cue.text.trim(),
-		index: cue.id,
-	}));
-
-	processSubtitles(subtitles);
-}
-
-// Función para parsear archivo VTT
-function parseVTT(vttText) {
-	const lines = vttText.trim().split('\n');
-	const subtitles = [];
-	let currentSub = null;
-
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i].trim();
-
-		if (line.includes('-->')) {
-			const [start, end] = line.split('-->').map((timeStr) => {
-				const [mins, secs] = timeStr.trim().split(':');
-				return parseFloat(mins) * 60 + parseFloat(secs);
-			});
-
-			currentSub = {
-				start,
-				end,
-				text: '',
-				index: subtitles.length,
-			};
-		} else if (currentSub && line !== '') {
-			currentSub.text += (currentSub.text ? '\n' : '') + line;
-		} else if (currentSub && line === '') {
-			if (currentSub.text) {
-				subtitles.push(currentSub);
-			}
-			currentSub = null;
-		}
-	}
-
-	if (currentSub?.text) {
-		subtitles.push(currentSub);
-	}
-
-	return subtitles;
-}
