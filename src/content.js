@@ -31,6 +31,7 @@ const config = {
 let isProcessing = false;
 let lastProcessedText = '';
 let lastDetectedSubtitle = '';
+let YTsubs = '';
 
 // Cargar configuraciones de manera segura
 chrome.storage.sync
@@ -104,16 +105,49 @@ function detectSubtitles() {
 			}
 		} else if (window.location.hostname.includes('youtube.com')) {
 			const elements = document.querySelectorAll('span.ytp-caption-segment');
-			for (const element of elements) {
-				if (element.offsetParent !== null && element.textContent.trim()) {
-					subtitleText = subtitleText + ' ' + element.textContent.trim();
+			const videoElement = document.querySelector('video');
+
+			// Solo proceder si tenemos video y subtítulos
+			if (videoElement && elements.length > 0) {
+				const videoRect = videoElement.getBoundingClientRect();
+				const videoMiddle = videoRect.top + videoRect.height / 2;
+
+				for (const element of elements) {
+					// Solo procesar elementos visibles
+					if (element.offsetParent !== null && element.textContent.trim()) {
+						const elementRect = element.getBoundingClientRect();
+						const elementMiddle = elementRect.top + elementRect.height / 2;
+
+						// Verificar si el subtítulo está en la mitad inferior del video
+						if (elementMiddle > videoMiddle) {
+							subtitleText += ' ' + element.textContent.trim();
+							log.info('Subtítulo detectado en posición:', {
+								videoMiddle,
+								elementMiddle,
+								text: element.textContent.trim(),
+							});
+						}
+					}
+				}
+
+				// Procesar el texto acumulado
+				if (subtitleText.trim()) {
+					if (subtitleText === lastDetectedSubtitle) {
+						return null;
+					}
+					if (lastDetectedSubtitle === '') {
+						YTsubs = subtitleText;
+					} else {
+						const words = subtitleText.trim().split(' ');
+						const lastWord = words[words.length - 1];
+						if (!YTsubs.includes(lastWord)) {
+							YTsubs += ' ' + lastWord;
+						}
+					}
+					lastDetectedSubtitle = subtitleText;
 				}
 			}
-			// Comprobar duplicados para YouTube
-			if (subtitleText === lastDetectedSubtitle) {
-				return null;
-			}
-			lastDetectedSubtitle = subtitleText;
+			return null;
 		} else if (window.location.hostname.includes('coursera.org')) {
 			const courseraElement = document.querySelector('.rc-SubtitleContent, .cue-text');
 			subtitleText = courseraElement?.textContent.trim() || '';
@@ -147,38 +181,47 @@ function initializePlatformObservers() {
 
 		log.info('🔄 Iniciando observación de subtítulos');
 
-		// Configurar y conectar el observer para detectar cambios en subtítulos
 		const observerConfig = {
 			childList: true,
 			subtree: true,
 			characterData: true,
 		};
 
+		// Quitar referencia incorrecta a targetNode
 		observer.observe(document.body, observerConfig);
-		log.info('🎯 Observer conectado a:', targetNode);
+		log.info('🎯 Observer conectado al body');
 
 		// Hacer una primera detección
 		const initialSubtitles = detectSubtitles();
 		if (initialSubtitles) {
 			log.info('✨ Subtítulos iniciales encontrados');
 			processSubtitle(initialSubtitles);
-		} else {
-			log.info('❌ No se encontraron subtítulos iniciales');
 		}
 	}
 
+	// Iniciar observación inmediatamente si está habilitado
 	if (config.isEnabled) {
 		startObservation();
 	}
 
-	// Reconectar el observer cada hora para evitar memory leaks
-	setTimeout(() => {
-		log.info('🔄 Reconectando observer por mantenimiento...');
+	// Reconectar el observer cada hora
+	setInterval(() => {
 		if (observer) {
 			observer.disconnect();
 			startObservation();
 		}
 	}, 3600000);
+
+	// Procesar subtítulos de YouTube cada 4 segundos
+	if (window.location.hostname.includes('youtube.com')) {
+		setInterval(() => {
+			if (config.isEnabled && YTsubs && YTsubs.trim() !== '') {
+				log.info('🔄 Procesando subtitulos de YouTube:', YTsubs);
+				processSubtitle(YTsubs);
+				YTsubs = ''; // Limpiar después de procesar
+			}
+		}, 3000);
+	}
 }
 
 // Modificar el observer para manejar la desaparición/reaparición
