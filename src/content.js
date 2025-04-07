@@ -275,65 +275,69 @@ async function processSubtitle(text) {
 	}
 }
 
-// Mejorar el processAudioQueue para manejar errores y reintentos
+// Actualizar configuración de audioQueue para reproducción secuencial
+const audioQueue = {
+	items: [],
+	currentlyPlaying: null,
+	isPlaying: false,
+	currentAudioElement: null,
+	lastPlayedText: '',
+	minProcessingInterval: 50, // Intervalo mínimo entre audios
+};
+
+// Modificar processAudioQueue para reproducción estrictamente secuencial
 async function processAudioQueue() {
-	if (isPlayingQueue || audioQueue.length === 0) return;
-	isPlayingQueue = true;
+	if (audioQueue.isPlaying || audioQueue.items.length === 0) return;
 
 	try {
-		while (audioQueue.length > 0) {
-			const audioData = audioQueue[0];
-			let retryCount = 0;
-			const maxRetries = 3;
+		audioQueue.isPlaying = true;
 
-			while (retryCount < maxRetries) {
-				try {
-					await new Promise((resolve, reject) => {
-						const audio = new Audio(audioData);
-						audio.volume = config.volume / 100;
-						audio.playbackRate = config.speed / 100;
+		while (audioQueue.items.length > 0) {
+			const {text, audioData} = audioQueue.items[0];
 
-						// Agregar timeout para prevenir bloqueos
-						const timeout = setTimeout(() => {
-							reject(new Error('Timeout'));
-						}, 5000);
+			// Detener audio actual si existe
+			if (audioQueue.currentAudioElement) {
+				audioQueue.currentAudioElement.pause();
+				audioQueue.currentAudioElement = null;
+			}
 
-						audio.onended = () => {
-							clearTimeout(timeout);
-							audioQueue.shift();
-							resolve();
-						};
+			// Reproducir el audio actual
+			try {
+				await new Promise((resolve, reject) => {
+					const audio = new Audio(audioData);
+					audioQueue.currentAudioElement = audio;
+					audio.volume = config.volume / 100;
+					audio.playbackRate = config.speed / 100;
 
-						audio.onerror = (e) => {
-							clearTimeout(timeout);
-							reject(new Error(`Audio error: ${e.message}`));
-						};
+					audio.onended = () => {
+						audioQueue.items.shift();
+						audioQueue.currentAudioElement = null;
+						resolve();
+					};
 
-						audio
-							.play()
-							.then(() => log.info('▶️ Reproduciendo audio'))
-							.catch(reject);
-					});
-					break; // Si tiene éxito, salir del bucle de reintentos
-				} catch (error) {
-					retryCount++;
-					log.warn(`Reintento ${retryCount}/${maxRetries} por error:`, error);
+					audio.onerror = reject;
 
-					if (retryCount === maxRetries) {
-						log.error('Error máximo de reintentos alcanzado, saltando audio');
-						audioQueue.shift(); // Eliminar el audio problemático
-						break;
-					}
+					audio
+						.play()
+						.then(() => log.info('▶️ Reproduciendo:', text))
+						.catch(reject);
+				});
 
-					// Esperar antes de reintentar (delay exponencial)
-					await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount));
+				// Pequeña pausa entre audios para claridad
+				if (audioQueue.items.length > 0) {
+					await new Promise((resolve) => setTimeout(resolve, audioQueue.minProcessingInterval));
 				}
+			} catch (error) {
+				log.error('Error reproduciendo audio, reintentando:', error);
+				await new Promise((resolve) => setTimeout(resolve, 500));
+				// No eliminamos el audio de la cola para reintentarlo
 			}
 		}
 	} catch (error) {
-		log.error('Error procesando cola de audio:', error);
+		log.error('Error en cola de audio:', error);
 	} finally {
-		isPlayingQueue = false;
+		audioQueue.isPlaying = false;
+		audioQueue.currentAudioElement = null;
 	}
 }
 
@@ -373,87 +377,20 @@ async function translateText(text) {
 // Agregar caché para audio
 const audioCache = new Map();
 
-// Mejorar control de cola de audio
-const audioQueue = {
-	items: [],
-	currentlyPlaying: null,
-	isPlaying: false,
-	currentAudioElement: null,
-	lastPlayedText: '',
-};
-
-// Reemplazar processAudioQueue
-async function processAudioQueue() {
-	if (audioQueue.isPlaying || audioQueue.items.length === 0) return;
-
-	try {
-		audioQueue.isPlaying = true;
-
-		while (audioQueue.items.length > 0) {
-			const {text, audioData} = audioQueue.items[0];
-
-			// Si este texto ya se está reproduciendo, ignorarlo
-			if (text === audioQueue.lastPlayedText) {
-				audioQueue.items.shift();
-				continue;
-			}
-
-			// Si hay un audio reproduciéndose, detenerlo
-			if (audioQueue.currentAudioElement) {
-				audioQueue.currentAudioElement.pause();
-				audioQueue.currentAudioElement = null;
-			}
-
-			await new Promise((resolve, reject) => {
-				const audio = new Audio(audioData);
-				audioQueue.currentAudioElement = audio;
-				audioQueue.lastPlayedText = text;
-
-				audio.volume = config.volume / 100;
-				audio.playbackRate = config.speed / 100;
-
-				audio.onended = () => {
-					audioQueue.items.shift();
-					audioQueue.currentAudioElement = null;
-					resolve();
-				};
-
-				audio.onerror = reject;
-
-				audio
-					.play()
-					.then(() => log.info('▶️ Reproduciendo:', text))
-					.catch(reject);
-			});
-		}
-	} catch (error) {
-		log.error('Error procesando cola de audio:', error);
-	} finally {
-		audioQueue.isPlaying = false;
-		audioQueue.currentAudioElement = null;
-	}
-}
-
-// Modificar synthesizeSpeech para incluir el texto en la cola
+// Modificar synthesizeSpeech para mantener la secuencialidad
 async function synthesizeSpeech(text) {
 	if (!text) return false;
 
 	try {
-		// Dividir textos largos
 		const chunks = text.match(/.{1,100}(?:[.!?]|$)/g) || [text];
 
 		for (const chunk of chunks) {
-			// Agregar delay entre peticiones
-			await new Promise((resolve) => setTimeout(resolve, 250));
-
 			const response = await new Promise((resolve, reject) => {
 				chrome.runtime.sendMessage(
 					{
 						action: 'synthesize',
 						text: chunk,
 						targetLang: config.targetLanguage,
-						volume: config.volume,
-						speed: config.speed,
 					},
 					(response) => {
 						if (!response?.success) {
@@ -466,7 +403,6 @@ async function synthesizeSpeech(text) {
 			});
 
 			if (response.audioData) {
-				// Usar el nuevo método de cola
 				audioQueue.items.push({
 					text: chunk,
 					audioData: response.audioData,
