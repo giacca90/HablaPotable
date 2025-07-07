@@ -104,6 +104,11 @@ function detectSubtitles() {
 				lastDetectedSubtitle = subtitleText;
 			}
 		} else if (window.location.hostname.includes('youtube.com')) {
+			// Solo procesar si estamos en una página de video
+			if (!window.location.pathname.includes('/watch')) {
+				return null;
+			}
+
 			const elements = document.querySelectorAll('span.ytp-caption-segment');
 			const videoElement = document.querySelector('video');
 
