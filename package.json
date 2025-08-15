@@ -1,6 +1,6 @@
 {
 	"name": "hablapotable",
-	"version": "1.0.0",
+	"version": "0.0.1",
 	"description": "Traductor de subtítulos en tiempo real",
 	"scripts": {
 		"build": "webpack",
@@ -10,7 +10,7 @@
 		"url": "^0.11.4"
 	},
 	"devDependencies": {
-		"webpack": "^5.99.0",
+		"webpack": "^5.101.2",
 		"webpack-cli": "^6.0.1"
 	}
 }
